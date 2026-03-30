@@ -117,7 +117,48 @@ pub fn tdvmcall_halt() {
     let _ = td_vmcall(&mut args);
 }
 
-/// Executing `hlt` instruction will cause a #VE to emulate the instruction. Safe halt operation
+/// Report a fatal error to the VMM and request TD teardown.
+///
+/// Unlike `tdvmcall_halt()`, which is ambiguous (could be idle), this explicitly
+/// signals an unrecoverable error. The VMM should tear down the TD rather than
+/// attempt to resume it.
+///
+/// `error_code` is a 64-bit value passed in R12 to identify the error class.
+/// `msg` is up to 64 bytes of context copied into registers R14, R15, RBX, RDI,
+/// RSI, R8, R9, RDX (matching the GHCI spec layout).
+///
+/// Details can be found in TDX GHCI spec section
+/// 'TDG.VP.VMCALL<ReportFatalError>'
+#[cfg(not(feature = "no-tdvmcall"))]
+pub fn tdvmcall_report_fatal_error(error_code: u64, msg: &[u8]) -> ! {
+    // Pack up to 64 bytes of message into 8 registers following the GHCI spec
+    // register order: R14, R15, RBX, RDI, RSI, R8, R9, RDX
+    let mut buf = [0u8; 64];
+    let copy_len = if msg.len() < 64 { msg.len() } else { 64 };
+    buf[..copy_len].copy_from_slice(&msg[..copy_len]);
+
+    let r = |off: usize| -> u64 {
+        u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
+    };
+
+    let mut args = TdVmcallArgsEx {
+        r11: TDVMCALL_REPORT_FATAL_ERROR,
+        r12: error_code,
+        r14: r(0),
+        r15: r(8),
+        rbx: r(16),
+        rdi: r(24),
+        rsi: r(32),
+        r8: r(40),
+        r9: r(48),
+        rdx: r(56),
+        ..Default::default()
+    };
+
+    loop {
+        td_vmcall_ex2(&mut args, false);
+    }
+}
 /// `sti;hlt` which typically used for idle is not working in this case since `hlt` instruction
 /// must be the instruction next to `sti`. To use safe halt, `sti` must be executed just before
 /// `tdcall` instruction.
